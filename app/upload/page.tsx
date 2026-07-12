@@ -53,10 +53,15 @@ export default function UploadPage() {
   }
 
   return (
-    <main className="mx-auto max-w-2xl px-4 py-8">
+    <main className="mx-auto max-w-2xl px-4 py-6 sm:py-8">
       <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-bold tracking-tight">Upload a roll</h1>
-        <Link href="/" className="text-sm text-blue-600 hover:underline">
+        <h1 className="text-xl font-bold tracking-tight sm:text-2xl">
+          Upload a roll
+        </h1>
+        <Link
+          href="/"
+          className="rounded-full bg-neutral-100 px-3.5 py-2 text-sm font-medium active:scale-95 dark:bg-neutral-800"
+        >
           ← Search
         </Link>
       </div>
@@ -78,15 +83,16 @@ export default function UploadPage() {
           )}
         </label>
 
-        <div className="grid grid-cols-3 gap-3 text-sm">
+        <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
           <label className="flex flex-col gap-1">
             <span className="text-neutral-500">Backend</span>
             <select
               value={backend}
               onChange={(e) => setBackend(e.target.value)}
-              className="rounded-lg border border-neutral-300 px-2 py-1.5 dark:border-neutral-700 dark:bg-neutral-900"
+              className="rounded-lg border border-neutral-300 px-3 py-2.5 text-base dark:border-neutral-700 dark:bg-neutral-900"
             >
               <option value="mistral-ocr">Mistral OCR</option>
+              <option value="mistral-vision">Mistral vision</option>
               <option value="vision">Claude vision</option>
             </select>
           </label>
@@ -95,8 +101,9 @@ export default function UploadPage() {
             <input
               value={maxPages}
               onChange={(e) => setMaxPages(e.target.value)}
+              inputMode="numeric"
               placeholder="all"
-              className="rounded-lg border border-neutral-300 px-2 py-1.5 dark:border-neutral-700 dark:bg-neutral-900"
+              className="rounded-lg border border-neutral-300 px-3 py-2.5 text-base dark:border-neutral-700 dark:bg-neutral-900"
             />
           </label>
           <label className="flex flex-col gap-1">
@@ -104,8 +111,9 @@ export default function UploadPage() {
             <input
               value={rpm}
               onChange={(e) => setRpm(e.target.value)}
+              inputMode="numeric"
               placeholder="none"
-              className="rounded-lg border border-neutral-300 px-2 py-1.5 dark:border-neutral-700 dark:bg-neutral-900"
+              className="rounded-lg border border-neutral-300 px-3 py-2.5 text-base dark:border-neutral-700 dark:bg-neutral-900"
             />
           </label>
         </div>
@@ -128,7 +136,7 @@ export default function UploadPage() {
         <button
           type="submit"
           disabled={!file || busy}
-          className="w-full rounded-lg bg-neutral-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-neutral-700 disabled:opacity-50 dark:bg-white dark:text-neutral-900"
+          className="w-full rounded-xl bg-neutral-900 px-4 py-3.5 text-base font-medium text-white active:scale-[0.99] disabled:opacity-50 dark:bg-white dark:text-neutral-900"
         >
           {busy ? "Extracting… (this can take a minute)" : "Extract & index"}
         </button>
