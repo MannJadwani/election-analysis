@@ -48,10 +48,13 @@ export default function Home() {
     }
   }, [q, gender]);
 
+  // Apply filters live: gender changes instantly, typing is debounced.
   useEffect(() => {
-    void search();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const t = setTimeout(() => {
+      void search();
+    }, 250);
+    return () => clearTimeout(t);
+  }, [q, gender, search]);
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
