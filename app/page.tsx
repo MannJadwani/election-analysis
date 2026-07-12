@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import { useSession, signOut } from "@/lib/auth-client";
 
 interface VoterRow {
   id: number;
@@ -34,6 +36,13 @@ function genderBadge(g: string | null) {
 }
 
 export default function Home() {
+  const router = useRouter();
+  const { data: session } = useSession();
+  const user = session?.user as
+    | { role?: string | null; scopeLevel?: string | null; scopeValue?: string | null; email?: string }
+    | undefined;
+  const isAdmin = user?.role === "admin";
+
   const [q, setQ] = useState("");
   const [gender, setGender] = useState("");
   const [rows, setRows] = useState<VoterRow[]>([]);
@@ -81,16 +90,47 @@ export default function Home() {
               <h1 className="truncate text-lg font-bold tracking-tight sm:text-xl">
                 Electoral Roll Search
               </h1>
-              <p className="hidden text-xs text-neutral-500 sm:block">
-                Voter lists transliterated to English — Hindi, Kannada &amp; more
-              </p>
+              {user?.scopeLevel && !isAdmin ? (
+                <p className="truncate text-xs text-neutral-500">
+                  Region: {user.scopeLevel} · {user.scopeValue}
+                </p>
+              ) : (
+                <p className="hidden text-xs text-neutral-500 sm:block">
+                  Voter lists transliterated to English — Hindi, Kannada &amp; more
+                </p>
+              )}
             </div>
-            <Link
-              href="/upload"
-              className="shrink-0 rounded-full bg-neutral-900 px-3.5 py-2 text-sm font-medium text-white active:scale-95 dark:bg-white dark:text-neutral-900"
-            >
-              + Upload
-            </Link>
+            <div className="flex shrink-0 items-center gap-2">
+              {isAdmin && (
+                <>
+                  <Link
+                    href="/dashboard"
+                    className="rounded-full bg-neutral-100 px-3 py-2 text-sm font-medium active:scale-95 dark:bg-neutral-800"
+                  >
+                    Dashboard
+                  </Link>
+                  <Link
+                    href="/upload"
+                    className="rounded-full bg-neutral-900 px-3.5 py-2 text-sm font-medium text-white active:scale-95 dark:bg-white dark:text-neutral-900"
+                  >
+                    + Upload
+                  </Link>
+                </>
+              )}
+              {user && (
+                <button
+                  onClick={async () => {
+                    await signOut();
+                    router.push("/login");
+                    router.refresh();
+                  }}
+                  className="rounded-full border border-neutral-300 px-3 py-2 text-sm font-medium active:scale-95 dark:border-neutral-700"
+                  aria-label="Sign out"
+                >
+                  Exit
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="relative">

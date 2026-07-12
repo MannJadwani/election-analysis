@@ -10,6 +10,7 @@ const nextConfig: NextConfig = {
     "@napi-rs/canvas",
     "@mistralai/mistralai",
     "@electric-sql/pglite",
+    "pg",
   ],
 };
 

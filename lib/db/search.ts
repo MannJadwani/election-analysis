@@ -1,4 +1,5 @@
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { getDb, schema } from "./index";
 
 export interface VoterSearchFilters {
@@ -11,6 +12,8 @@ export interface VoterSearchFilters {
   ageMax?: number;
   limit?: number;
   offset?: number;
+  /** Extra condition applied to every query, e.g. region-incharge scoping. */
+  scope?: SQL;
 }
 
 export interface VoterSearchRow {
@@ -62,6 +65,7 @@ export async function searchVoters(
   if (filters.gender) conds.push(eq(v.gender, filters.gender));
   if (filters.ageMin != null) conds.push(sql`${v.age} >= ${filters.ageMin}`);
   if (filters.ageMax != null) conds.push(sql`${v.age} <= ${filters.ageMax}`);
+  if (filters.scope) conds.push(filters.scope);
 
   const where = conds.length ? and(...conds) : undefined;
 

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { useSession } from "@/lib/auth-client";
 
 interface IngestResponse {
   partId: number;
@@ -27,6 +28,9 @@ export default function UploadPage() {
   const [result, setResult] = useState<IngestResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const { data: session, isPending } = useSession();
+  const isAdmin = (session?.user as { role?: string } | undefined)?.role === "admin";
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!file) return;
@@ -50,6 +54,22 @@ export default function UploadPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  if (!isPending && !isAdmin) {
+    return (
+      <main className="mx-auto max-w-2xl px-4 py-16 text-center">
+        <p className="text-neutral-500">
+          Uploading rolls is restricted to administrators.
+        </p>
+        <Link
+          href="/"
+          className="mt-4 inline-block rounded-full bg-neutral-100 px-4 py-2 text-sm font-medium dark:bg-neutral-800"
+        >
+          ← Back to search
+        </Link>
+      </main>
+    );
   }
 
   return (

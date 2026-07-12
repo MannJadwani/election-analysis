@@ -1,15 +1,23 @@
 import { NextResponse } from "next/server";
 import { ingestPdf, type Backend } from "@/lib/extraction/pipeline";
 import { saveIngestResult } from "@/lib/db/persist";
+import { getUser, isAdmin } from "@/lib/auth-helpers";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 /**
  * Upload an electoral roll PDF (multipart form field "file"), run extraction,
- * and persist the result. Optional form fields: backend, maxPages.
+ * and persist the result. Admin only. Optional form fields: backend, maxPages.
  */
 export async function POST(req: Request) {
+  const user = await getUser(req.headers);
+  if (!isAdmin(user)) {
+    return NextResponse.json(
+      { error: "Admin access required" },
+      { status: 403 },
+    );
+  }
   try {
     const form = await req.formData();
     const file = form.get("file");
