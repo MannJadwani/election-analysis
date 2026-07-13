@@ -3,7 +3,9 @@ import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { getUser, isAdmin } from "@/lib/auth-helpers";
 import { getRegionOptions, getStats } from "@/lib/db/regions";
+import { getAnalytics } from "@/lib/db/analytics";
 import { UserManager } from "./user-manager";
+import { Analytics } from "./charts";
 import { SignOutButton } from "./sign-out";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +15,11 @@ export default async function DashboardPage() {
   if (!user) redirect("/login?next=/dashboard");
   if (!isAdmin(user)) redirect("/");
 
-  const [stats, regions] = await Promise.all([getStats(), getRegionOptions()]);
+  const [stats, regions, analytics] = await Promise.all([
+    getStats(),
+    getRegionOptions(),
+    getAnalytics(),
+  ]);
 
   return (
     <main className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
@@ -43,20 +49,15 @@ export default async function DashboardPage() {
       </section>
 
       <section className="mb-8">
-        <h2 className="mb-2 text-sm font-semibold text-neutral-500">
-          Voters by state
+        <h2 className="mb-3 text-sm font-semibold text-neutral-500">
+          Analytics
         </h2>
-        <div className="overflow-hidden rounded-xl border border-neutral-200 dark:border-neutral-800">
-          {stats.byState.map((s, i) => (
-            <div
-              key={s.state ?? i}
-              className="flex items-center justify-between border-b border-neutral-100 px-4 py-2.5 text-sm last:border-0 dark:border-neutral-800"
-            >
-              <span>{s.state ?? "—"}</span>
-              <span className="font-medium">{s.voters.toLocaleString()}</span>
-            </div>
-          ))}
-        </div>
+        <Analytics
+          gender={analytics.gender}
+          age={analytics.age}
+          constituency={analytics.constituency}
+          roles={analytics.roles}
+        />
       </section>
 
       <UserManager regions={regions} />
