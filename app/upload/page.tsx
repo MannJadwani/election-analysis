@@ -46,8 +46,19 @@ export default function UploadPage() {
       fd.set("concurrency", "1");
       fd.set("epicVision", String(epicVision));
       const res = await fetch("/api/ingest", { method: "POST", body: fd });
-      const data = (await res.json()) as IngestResponse;
-      if (!res.ok) throw new Error(data.error ?? "Ingest failed");
+      // The route can die before it returns JSON (crash, timeout, 413 from a
+      // proxy) — read as text so the real failure surfaces instead of a
+      // "JSON.parse: unexpected character" from an HTML error page.
+      const body = await res.text();
+      let data: IngestResponse | null = null;
+      try {
+        data = JSON.parse(body) as IngestResponse;
+      } catch {
+        throw new Error(
+          `Ingest failed (HTTP ${res.status}): ${body.slice(0, 300) || "empty response"}`,
+        );
+      }
+      if (!res.ok) throw new Error(data.error ?? `Ingest failed (HTTP ${res.status})`);
       setResult(data);
     } catch (e) {
       setError((e as Error).message);

@@ -11,14 +11,14 @@ export const maxDuration = 300;
  * and persist the result. Admin only. Optional form fields: backend, maxPages.
  */
 export async function POST(req: Request) {
-  const user = await getUser(req.headers);
-  if (!isAdmin(user)) {
-    return NextResponse.json(
-      { error: "Admin access required" },
-      { status: 403 },
-    );
-  }
   try {
+    const user = await getUser(req.headers);
+    if (!isAdmin(user)) {
+      return NextResponse.json(
+        { error: "Admin access required" },
+        { status: 403 },
+      );
+    }
     const form = await req.formData();
     const file = form.get("file");
     if (!(file instanceof File)) {
@@ -49,6 +49,7 @@ export async function POST(req: Request) {
       stats: result.stats,
     });
   } catch (err) {
+    console.error("[ingest] failed:", err);
     return NextResponse.json(
       { error: (err as Error).message },
       { status: 500 },
