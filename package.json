@@ -17,6 +17,7 @@
     "@ai-sdk/mistral": "^4.0.8",
     "@electric-sql/pglite": "^0.5.4",
     "@mistralai/mistralai": "^2.4.1",
+    "@vercel/blob": "^2.6.1",
     "ai": "^7.0.22",
     "better-auth": "^1.6.23",
     "drizzle-orm": "^0.45.2",

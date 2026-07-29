@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { upload } from "@vercel/blob/client";
 import { useSession } from "@/lib/auth-client";
 
 interface IngestResponse {
@@ -25,6 +26,7 @@ export default function UploadPage() {
   const [rpm, setRpm] = useState("3");
   const [epicVision, setEpicVision] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState<"uploading" | "extracting" | null>(null);
   const [result, setResult] = useState<IngestResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,24 +40,40 @@ export default function UploadPage() {
     setError(null);
     setResult(null);
     try {
-      const fd = new FormData();
-      fd.set("file", file);
-      fd.set("backend", backend);
-      if (maxPages) fd.set("maxPages", maxPages);
-      if (rpm) fd.set("rpm", rpm);
-      fd.set("concurrency", "1");
-      fd.set("epicVision", String(epicVision));
-      const res = await fetch("/api/ingest", { method: "POST", body: fd });
-      // The route can die before it returns JSON (crash, timeout, 413 from a
-      // proxy) — read as text so the real failure surfaces instead of a
-      // "JSON.parse: unexpected character" from an HTML error page.
-      const body = await res.text();
+      // Upload the PDF straight to Blob storage so a large roll never hits the
+      // serverless request body limit (FUNCTION_PAYLOAD_TOO_LARGE / HTTP 413).
+      setPhase("uploading");
+      const blob = await upload(file.name, file, {
+        access: "public",
+        contentType: "application/pdf",
+        handleUploadUrl: "/api/blob/upload",
+      });
+
+      // Then run extraction, passing only the blob URL as JSON.
+      setPhase("extracting");
+      const res = await fetch("/api/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: blob.url,
+          fileName: file.name,
+          backend,
+          maxPages: maxPages ? Number(maxPages) : undefined,
+          rpm: rpm ? Number(rpm) : undefined,
+          concurrency: 1,
+          epicVision,
+        }),
+      });
+      // The route can die before it returns JSON (crash, timeout) — read as text
+      // so the real failure surfaces instead of a "JSON.parse: unexpected
+      // character" from an HTML error page.
+      const respBody = await res.text();
       let data: IngestResponse | null = null;
       try {
-        data = JSON.parse(body) as IngestResponse;
+        data = JSON.parse(respBody) as IngestResponse;
       } catch {
         throw new Error(
-          `Ingest failed (HTTP ${res.status}): ${body.slice(0, 300) || "empty response"}`,
+          `Ingest failed (HTTP ${res.status}): ${respBody.slice(0, 300) || "empty response"}`,
         );
       }
       if (!res.ok) throw new Error(data.error ?? `Ingest failed (HTTP ${res.status})`);
@@ -64,6 +82,7 @@ export default function UploadPage() {
       setError((e as Error).message);
     } finally {
       setBusy(false);
+      setPhase(null);
     }
   }
 
@@ -169,7 +188,11 @@ export default function UploadPage() {
           disabled={!file || busy}
           className="w-full rounded-xl bg-neutral-900 px-4 py-3.5 text-base font-medium text-white active:scale-[0.99] disabled:opacity-50 dark:bg-white dark:text-neutral-900"
         >
-          {busy ? "Extracting… (this can take a minute)" : "Extract & index"}
+          {phase === "uploading"
+            ? "Uploading…"
+            : phase === "extracting"
+              ? "Extracting… (this can take a minute)"
+              : "Extract & index"}
         </button>
       </form>
 
