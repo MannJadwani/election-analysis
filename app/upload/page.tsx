@@ -5,29 +5,27 @@ import { useState } from "react";
 import { upload } from "@vercel/blob/client";
 import { useSession } from "@/lib/auth-client";
 
-interface IngestResponse {
-  partId: number;
+interface JobStatus {
+  id: number;
+  status: "pending" | "processing" | "done" | "error";
+  totalPages: number | null;
+  processedPages: number;
   voterCount: number;
-  metadata: Record<string, unknown>;
-  stats: {
-    backend: string;
-    totalPages: number;
-    processedPages: number;
-    languages: string[];
-    voterCount: number;
-  };
-  error?: string;
+  partId: number | null;
+  metadata: Record<string, unknown> | null;
+  error: string | null;
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [backend, setBackend] = useState("mistral-ocr");
-  const [maxPages, setMaxPages] = useState("4");
   const [rpm, setRpm] = useState("3");
   const [epicVision, setEpicVision] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [phase, setPhase] = useState<"uploading" | "extracting" | null>(null);
-  const [result, setResult] = useState<IngestResponse | null>(null);
+  const [phase, setPhase] = useState<"uploading" | "starting" | "processing" | null>(null);
+  const [job, setJob] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const { data: session, isPending } = useSession();
@@ -38,10 +36,10 @@ export default function UploadPage() {
     if (!file) return;
     setBusy(true);
     setError(null);
-    setResult(null);
+    setJob(null);
     try {
-      // Upload the PDF straight to Blob storage so a large roll never hits the
-      // serverless request body limit (FUNCTION_PAYLOAD_TOO_LARGE / HTTP 413).
+      // Upload the PDF straight to Blob so a large roll never hits the serverless
+      // request body limit (FUNCTION_PAYLOAD_TOO_LARGE / HTTP 413).
       setPhase("uploading");
       const blob = await upload(file.name, file, {
         access: "public",
@@ -49,35 +47,49 @@ export default function UploadPage() {
         handleUploadUrl: "/api/blob/upload",
       });
 
-      // Then run extraction, passing only the blob URL as JSON.
-      setPhase("extracting");
-      const res = await fetch("/api/ingest", {
+      // Start a resumable ingestion job (one page per serverless step) — this
+      // returns immediately with a jobId; the work happens in the background.
+      setPhase("starting");
+      const startRes = await fetch("/api/ingest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: blob.url,
           fileName: file.name,
           backend,
-          maxPages: maxPages ? Number(maxPages) : undefined,
           rpm: rpm ? Number(rpm) : undefined,
-          concurrency: 1,
           epicVision,
         }),
       });
-      // The route can die before it returns JSON (crash, timeout) — read as text
-      // so the real failure surfaces instead of a "JSON.parse: unexpected
-      // character" from an HTML error page.
-      const respBody = await res.text();
-      let data: IngestResponse | null = null;
+      const startBody = await startRes.text();
+      let start: { jobId?: number; error?: string } = {};
       try {
-        data = JSON.parse(respBody) as IngestResponse;
+        start = JSON.parse(startBody);
       } catch {
         throw new Error(
-          `Ingest failed (HTTP ${res.status}): ${respBody.slice(0, 300) || "empty response"}`,
+          `Couldn't start ingestion (HTTP ${startRes.status}): ${startBody.slice(0, 300) || "empty response"}`,
         );
       }
-      if (!res.ok) throw new Error(data.error ?? `Ingest failed (HTTP ${res.status})`);
-      setResult(data);
+      if (!startRes.ok || !start.jobId) {
+        throw new Error(start.error ?? `Couldn't start ingestion (HTTP ${startRes.status})`);
+      }
+
+      // Poll status until the job finishes. The status endpoint also re-kicks a
+      // stalled job, so keeping this tab open keeps the job moving.
+      setPhase("processing");
+      const jobId = start.jobId;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        await sleep(3000);
+        const st = await fetch(`/api/jobs/status?id=${jobId}`);
+        if (!st.ok) continue; // transient — keep polling
+        const data = (await st.json()) as JobStatus;
+        setJob(data);
+        if (data.status === "done") break;
+        if (data.status === "error") {
+          throw new Error(data.error ?? "Ingestion failed");
+        }
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -101,6 +113,19 @@ export default function UploadPage() {
       </main>
     );
   }
+
+  const pct =
+    job?.totalPages && job.totalPages > 0
+      ? Math.round((job.processedPages / job.totalPages) * 100)
+      : null;
+  const buttonLabel =
+    phase === "uploading"
+      ? "Uploading…"
+      : phase === "starting"
+        ? "Starting…"
+        : phase === "processing"
+          ? "Extracting…"
+          : "Extract & index";
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-6 sm:py-8">
@@ -133,7 +158,7 @@ export default function UploadPage() {
           )}
         </label>
 
-        <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
+        <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
           <label className="flex flex-col gap-1">
             <span className="text-neutral-500">Backend</span>
             <select
@@ -145,16 +170,6 @@ export default function UploadPage() {
               <option value="mistral-vision">Mistral vision</option>
               <option value="vision">Claude vision</option>
             </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-neutral-500">Max pages</span>
-            <input
-              value={maxPages}
-              onChange={(e) => setMaxPages(e.target.value)}
-              inputMode="numeric"
-              placeholder="all"
-              className="rounded-lg border border-neutral-300 px-3 py-2.5 text-base dark:border-neutral-700 dark:bg-neutral-900"
-            />
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-neutral-500">Req/min cap</span>
@@ -179,8 +194,9 @@ export default function UploadPage() {
           </span>
         </label>
         <p className="text-xs text-neutral-500">
-          Tip: free-tier Mistral keys allow only 4 requests/min — keep the cap at
-          3 and max pages low, or extraction will hit rate limits.
+          The whole roll is processed one page at a time in the background — large
+          rolls just take longer. Keep this tab open until it finishes. On a
+          free-tier Mistral key (4 requests/min), keep the cap at 3.
         </p>
 
         <button
@@ -188,32 +204,54 @@ export default function UploadPage() {
           disabled={!file || busy}
           className="w-full rounded-xl bg-neutral-900 px-4 py-3.5 text-base font-medium text-white active:scale-[0.99] disabled:opacity-50 dark:bg-white dark:text-neutral-900"
         >
-          {phase === "uploading"
-            ? "Uploading…"
-            : phase === "extracting"
-              ? "Extracting… (this can take a minute)"
-              : "Extract & index"}
+          {buttonLabel}
         </button>
       </form>
+
+      {busy && phase === "processing" && job && (
+        <div className="mt-6 rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-4 text-sm dark:border-neutral-800 dark:bg-neutral-900">
+          <div className="mb-2 flex items-center justify-between font-medium">
+            <span>Extracting…</span>
+            <span className="tabular-nums text-neutral-600 dark:text-neutral-400">
+              {job.totalPages
+                ? `${job.processedPages}/${job.totalPages} pages`
+                : `${job.processedPages} pages`}
+              {" · "}
+              {job.voterCount} voters
+            </span>
+          </div>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
+            <div
+              className="h-full rounded-full bg-neutral-900 transition-all dark:bg-white"
+              style={{ width: `${pct ?? 8}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="mt-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
           {error}
+          {job && job.processedPages > 0 && (
+            <div className="mt-1 text-red-600/80 dark:text-red-300/80">
+              Indexed {job.voterCount} voters from {job.processedPages} pages
+              before stopping.
+            </div>
+          )}
         </div>
       )}
 
-      {result && (
+      {job?.status === "done" && (
         <div className="mt-6 rounded-lg border border-green-300 bg-green-50 px-4 py-4 text-sm dark:border-green-900 dark:bg-green-950">
           <div className="font-medium text-green-800 dark:text-green-300">
-            Indexed {result.voterCount} voters
-            {result.metadata.assembly_constituency_name
-              ? ` from ${result.metadata.assembly_constituency_name}`
+            Indexed {job.voterCount} voters
+            {(job.metadata?.assembly_constituency_name as string)
+              ? ` from ${job.metadata!.assembly_constituency_name as string}`
               : ""}
             .
           </div>
           <div className="mt-1 text-neutral-600 dark:text-neutral-400">
-            {result.stats.processedPages}/{result.stats.totalPages} pages ·{" "}
-            {result.stats.backend} · {result.stats.languages.join(", ")}
+            {job.processedPages}/{job.totalPages ?? job.processedPages} pages · {backend}
           </div>
           <Link
             href="/"

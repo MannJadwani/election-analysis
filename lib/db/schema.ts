@@ -4,6 +4,8 @@ import {
   integer,
   text,
   timestamp,
+  boolean,
+  jsonb,
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
@@ -76,3 +78,49 @@ export type Part = typeof parts.$inferSelect;
 export type NewPart = typeof parts.$inferInsert;
 export type VoterRow = typeof voters.$inferSelect;
 export type NewVoter = typeof voters.$inferInsert;
+
+/**
+ * A resumable ingestion job. A large scanned roll can't be processed inside one
+ * serverless invocation (Vercel Hobby caps functions at ~60s), so ingestion is
+ * split into many short steps that each process one page and chain the next.
+ * This row is the durable cursor + progress that survives across those steps.
+ */
+export const ingestJobs = pgTable(
+  "ingest_jobs",
+  {
+    id: serial("id").primaryKey(),
+    // pending → processing → done | error
+    status: text("status").notNull().default("pending"),
+    // Public Blob URL of the uploaded PDF (re-fetched by each step).
+    blobUrl: text("blob_url").notNull(),
+    fileName: text("file_name"),
+    backend: text("backend").notNull().default("mistral-ocr"),
+    // Per-key rate limit; the step scheduler spaces API calls by 60000/rpm ms.
+    rpm: integer("rpm"),
+    epicVision: boolean("epic_vision").notNull().default(false),
+    scale: integer("scale").notNull().default(2),
+    // Null until the first step runs analyzePdf.
+    totalPages: integer("total_pages"),
+    // 1-based cursor: the next page a step should process.
+    nextPage: integer("next_page").notNull().default(1),
+    processedPages: integer("processed_pages").notNull().default(0),
+    voterCount: integer("voter_count").notNull().default(0),
+    // The part row is created up front so voters can be inserted incrementally.
+    partId: integer("part_id").references(() => parts.id, {
+      onDelete: "set null",
+    }),
+    // Accumulated part metadata merged across pages as it's discovered.
+    metadata: jsonb("metadata"),
+    // Retries for the current page before the job is marked errored.
+    attempts: integer("attempts").notNull().default(0),
+    error: text("error"),
+    createdBy: text("created_by"),
+    // Heartbeat: bumped at the start of every step; used to detect a stalled job.
+    lastStepAt: timestamp("last_step_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [index("ingest_jobs_status_idx").on(t.status)],
+);
+
+export type IngestJob = typeof ingestJobs.$inferSelect;
+export type NewIngestJob = typeof ingestJobs.$inferInsert;

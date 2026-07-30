@@ -18,6 +18,15 @@ const nextConfig: NextConfig = {
   // at runtime as "Cannot find module '@napi-rs/canvas'" → "DOMMatrix is not
   // defined". Force-include the package and its Linux binaries into the trace.
   outputFileTracingIncludes: {
+    // The page render (pdf-to-img → pdfjs → @napi-rs/canvas) now runs in the
+    // worker step; the CLI-style /api/ingest kept for safety. Both need the
+    // native skia binaries force-included, since the tracer can't see the
+    // dynamic require() pdfjs uses to load canvas.
+    "/api/jobs/step": [
+      "./node_modules/@napi-rs/canvas/**/*",
+      "./node_modules/@napi-rs/canvas-linux-x64-gnu/**/*",
+      "./node_modules/@napi-rs/canvas-linux-x64-musl/**/*",
+    ],
     "/api/ingest": [
       "./node_modules/@napi-rs/canvas/**/*",
       "./node_modules/@napi-rs/canvas-linux-x64-gnu/**/*",

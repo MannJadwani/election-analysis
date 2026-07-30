@@ -108,6 +108,78 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+export interface ProcessPageOptions {
+  backend?: Backend;
+  scale?: number;
+  epicVision?: boolean;
+  model?: string;
+  fileName?: string;
+  /** Raw PDF text-layer for this page (helps digital rolls; empty for scans). */
+  textLayer?: string;
+}
+
+/**
+ * Process exactly ONE page of a roll and return its extraction. This is the unit
+ * of work for the resumable, self-chaining ingestion worker (see /api/jobs/step):
+ * each serverless step handles a single page so it stays well under the function
+ * time limit, then persists the result and triggers the next page.
+ */
+export async function processPage(
+  data: Uint8Array,
+  pageNumber: number,
+  opts: ProcessPageOptions = {},
+): Promise<PageExtraction> {
+  const { backend = "mistral-ocr", scale = 2, epicVision = false, model, fileName, textLayer } = opts;
+
+  if (backend === "vision" || backend === "mistral-vision") {
+    const modelSpec =
+      model ??
+      (backend === "mistral-vision"
+        ? (process.env.VISION_MODEL ?? "mistral/pixtral-12b-2409")
+        : (process.env.EXTRACTION_MODEL ?? "anthropic/claude-sonnet-5"));
+    const [rendered] = await renderPages(data, { scale, pageNumbers: [pageNumber] });
+    if (!rendered) {
+      return { page_type: "other", source_language: null, metadata: null, voters: [], notes: "no such page" };
+    }
+    return extractPage(rendered.png, { pageNumber, textLayer, model: modelSpec });
+  }
+
+  // Mistral OCR backend: OCR this one page, then structure it.
+  const [ocrPage] = await ocrPdf(data, { fileName, pages: [pageNumber] });
+  if (!ocrPage) {
+    return { page_type: "other", source_language: null, metadata: null, voters: [], notes: "no such page" };
+  }
+  const page = await structurePage(ocrPage.markdown, { pageNumber, textLayer });
+
+  // Backfill EPIC IDs via a vision pass when OCR dropped most of them (scans).
+  if (epicVision && page.voters.length > 0) {
+    const missing = page.voters.filter((v) => !v.epic_id).length;
+    if (missing > page.voters.length / 2) {
+      const [rp] = await renderPages(data, { scale, pageNumbers: [pageNumber] });
+      if (rp) {
+        const epics = await extractEpics(rp.png, { pageNumber });
+        for (let i = 0; i < page.voters.length; i++) {
+          if (!page.voters[i].epic_id && epics[i]) page.voters[i].epic_id = epics[i];
+        }
+      }
+    }
+  }
+  return page;
+}
+
+/** Merge one page's metadata fragment into an accumulator (first non-null wins). */
+export function mergeMetadataInto(
+  acc: Record<string, unknown>,
+  page: PageExtraction,
+): Record<string, unknown> {
+  if (page.metadata) {
+    for (const [k, v] of Object.entries(page.metadata)) {
+      if (v != null && acc[k] == null) acc[k] = v;
+    }
+  }
+  return acc;
+}
+
 /**
  * Full pipeline: PDF bytes -> structured part metadata + voter list.
  *
