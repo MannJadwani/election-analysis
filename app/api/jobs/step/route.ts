@@ -16,8 +16,20 @@ const MAX_ATTEMPTS = 3;
 // Longest a pacing "nap" step sleeps before re-kicking. Kept short so a working
 // step never combines a long sleep with page work and trips the 60s limit.
 const NAP_MS = 8_000;
+// Abort a page ourselves before Vercel's hard 60s kill (which can't be caught),
+// so a slow page becomes a retryable soft error instead of a silent job-killer.
+const SOFT_MS = 48_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`page work exceeded ${ms / 1000}s`)), ms),
+    ),
+  ]);
+}
 
 /**
  * Process ONE page of a roll, persist it, and chain the next page. Guarded by a
@@ -127,14 +139,21 @@ export async function POST(req: Request) {
       .where(eq(schema.ingestJobs.id, job.id));
 
     try {
-      const page = await processPage(data, pageNumber, {
-        backend: job.backend as Backend,
-        scale: job.scale,
-        epicVision: job.epicVision,
-        fileName: job.fileName ?? undefined,
-        textLayer,
-        ocrFileId,
-      });
+      // On the final attempt, drop the extra EPIC-vision call so a heavy page
+      // still saves its voters (EPIC ids may be missing for that page) instead
+      // of failing the whole job. Earlier attempts keep it for full fidelity.
+      const useEpic = job.epicVision && attemptNo < MAX_ATTEMPTS;
+      const page = await withTimeout(
+        processPage(data, pageNumber, {
+          backend: job.backend as Backend,
+          scale: job.scale,
+          epicVision: useEpic,
+          fileName: job.fileName ?? undefined,
+          textLayer,
+          ocrFileId,
+        }),
+        SOFT_MS,
+      );
 
       const inserted = job.partId ? await insertVoters(job.partId, page.voters) : 0;
 
