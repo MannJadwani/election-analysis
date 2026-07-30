@@ -76,13 +76,18 @@ export async function POST(req: Request) {
       }
     }
 
-    // Re-fetch the PDF (steps are stateless) and read its structure.
+    // Re-fetch the PDF (steps are stateless).
     const res = await fetch(job.blobUrl);
     if (!res.ok) throw new Error(`fetch blob failed (${res.status})`);
     const data = new Uint8Array(await res.arrayBuffer());
-    const info = await analyzePdf(data).catch(() => null);
-    const totalPages = job.totalPages ?? info?.totalPages ?? 0;
+
+    // Parse the PDF only once (first step) to learn the page count — re-parsing
+    // a 12 MB file every step is wasted time and eats into the 60s budget.
+    let info = null;
+    let totalPages = job.totalPages ?? 0;
     if (job.totalPages == null) {
+      info = await analyzePdf(data).catch(() => null);
+      totalPages = info?.totalPages ?? 0;
       await db
         .update(schema.ingestJobs)
         .set({ totalPages })
@@ -204,12 +209,16 @@ export async function POST(req: Request) {
     } catch (pageErr) {
       // Soft failure (rate limit, transient API error). The attempt was already
       // counted up front; give up once they're exhausted, else re-kick to retry.
+      // Also drop the Mistral file id: if the upload expired (e.g. the job was
+      // paused for hours), clearing it makes the retry re-upload and recover.
       const giveUp = attemptNo >= MAX_ATTEMPTS;
+      if (ocrFileId) await deleteOcrFile(ocrFileId);
       await db
         .update(schema.ingestJobs)
         .set({
           status: giveUp ? "error" : "processing",
           error: giveUp ? `page ${pageNumber}: ${(pageErr as Error).message}` : null,
+          ocrFileId: null,
           lastStepAt: new Date(),
         })
         .where(eq(schema.ingestJobs.id, job.id));
