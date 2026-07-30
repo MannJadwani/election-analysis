@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { getDb, schema } from "./index";
 import type { IngestResult } from "../extraction/pipeline";
 import type { PartMetadata, Voter } from "../extraction/schemas";
@@ -99,6 +99,27 @@ export async function updatePartMetadata(
   language?: string | null,
 ): Promise<void> {
   const db = await getDb();
+
+  // A part is uniquely identified by (constituency no, part no, revision year).
+  // If this roll matches a part already in the DB (a re-upload, or a prior
+  // partial ingest of the same file), replace it: drop the old row — cascading
+  // its voters — so the fresh ingest wins, and to avoid the unique-index clash.
+  const ac = metadata.assembly_constituency_no;
+  const pn = metadata.part_no;
+  const yr = metadata.revision_year;
+  if (ac != null && pn != null && yr != null) {
+    await db
+      .delete(schema.parts)
+      .where(
+        and(
+          eq(schema.parts.assemblyConstituencyNo, ac),
+          eq(schema.parts.partNo, pn),
+          eq(schema.parts.revisionYear, yr),
+          ne(schema.parts.id, partId),
+        ),
+      );
+  }
+
   await db
     .update(schema.parts)
     .set({
