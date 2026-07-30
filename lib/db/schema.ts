@@ -109,6 +109,8 @@ export const ingestJobs = pgTable(
     partId: integer("part_id").references(() => parts.id, {
       onDelete: "set null",
     }),
+    // mistral-ocr: the PDF is uploaded to Mistral once and reused for every page.
+    ocrFileId: text("ocr_file_id"),
     // Accumulated part metadata merged across pages as it's discovered.
     metadata: jsonb("metadata"),
     // Retries for the current page before the job is marked errored.

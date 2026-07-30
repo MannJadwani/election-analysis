@@ -1,6 +1,6 @@
 import { analyzePdf, renderPages } from "../pdf";
 import { extractPage, extractEpics } from "./extract";
-import { ocrPdf } from "./mistral-ocr";
+import { ocrPdf, ocrByFileId } from "./mistral-ocr";
 import { structurePage } from "./structure";
 import {
   partMetadataSchema,
@@ -116,6 +116,11 @@ export interface ProcessPageOptions {
   fileName?: string;
   /** Raw PDF text-layer for this page (helps digital rolls; empty for scans). */
   textLayer?: string;
+  /**
+   * mistral-ocr only: id of a PDF already uploaded to Mistral (see uploadForOcr).
+   * Lets the worker OCR one page without re-uploading the whole roll each step.
+   */
+  ocrFileId?: string;
 }
 
 /**
@@ -129,7 +134,7 @@ export async function processPage(
   pageNumber: number,
   opts: ProcessPageOptions = {},
 ): Promise<PageExtraction> {
-  const { backend = "mistral-ocr", scale = 2, epicVision = false, model, fileName, textLayer } = opts;
+  const { backend = "mistral-ocr", scale = 2, epicVision = false, model, fileName, textLayer, ocrFileId } = opts;
 
   if (backend === "vision" || backend === "mistral-vision") {
     const modelSpec =
@@ -144,8 +149,11 @@ export async function processPage(
     return extractPage(rendered.png, { pageNumber, textLayer, model: modelSpec });
   }
 
-  // Mistral OCR backend: OCR this one page, then structure it.
-  const [ocrPage] = await ocrPdf(data, { fileName, pages: [pageNumber] });
+  // Mistral OCR backend: OCR this one page, then structure it. Prefer OCR by a
+  // pre-uploaded file id (worker path) to avoid re-uploading the whole PDF.
+  const [ocrPage] = ocrFileId
+    ? await ocrByFileId(ocrFileId, [pageNumber])
+    : await ocrPdf(data, { fileName, pages: [pageNumber] });
   if (!ocrPage) {
     return { page_type: "other", source_language: null, metadata: null, voters: [], notes: "no such page" };
   }

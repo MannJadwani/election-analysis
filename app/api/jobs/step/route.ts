@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { analyzePdf } from "@/lib/pdf";
 import { processPage, mergeMetadataInto, type Backend } from "@/lib/extraction/pipeline";
+import { uploadForOcr, deleteOcrFile } from "@/lib/extraction/mistral-ocr";
 import { insertVoters, updatePartMetadata } from "@/lib/db/persist";
 import { partMetadataSchema } from "@/lib/extraction/schemas";
 import { originFromHeaders, kickStep, workerAuthorized } from "@/lib/ingest/worker";
@@ -78,11 +79,27 @@ export async function POST(req: Request) {
 
     // Done?
     if (totalPages > 0 && job.nextPage > totalPages) {
+      if (job.ocrFileId) await deleteOcrFile(job.ocrFileId);
       await db
         .update(schema.ingestJobs)
-        .set({ status: "done" })
+        .set({ status: "done", ocrFileId: null })
         .where(eq(schema.ingestJobs.id, job.id));
       return NextResponse.json({ status: "done", processedPages: job.processedPages });
+    }
+
+    // mistral-ocr: upload the PDF to Mistral ONCE (its own step) so the heavy
+    // ~12 MB upload never shares an invocation with per-page OCR/vision work —
+    // that combination is what tripped the 60s function limit. Every later page
+    // OCRs by this file id instead of re-uploading.
+    let ocrFileId = job.ocrFileId ?? undefined;
+    if (job.backend === "mistral-ocr" && !ocrFileId) {
+      ocrFileId = await uploadForOcr(data, job.fileName ?? "roll.pdf");
+      await db
+        .update(schema.ingestJobs)
+        .set({ ocrFileId, lastStepAt: new Date() })
+        .where(eq(schema.ingestJobs.id, job.id));
+      after(() => kickStep(originFromHeaders(req.headers), job.id));
+      return NextResponse.json({ status: "processing", uploaded: true });
     }
 
     const pageNumber = job.nextPage;
@@ -93,10 +110,12 @@ export async function POST(req: Request) {
     // up front it would retry forever. After MAX_ATTEMPTS, give up on the job.
     const attemptNo = job.attempts + 1;
     if (attemptNo > MAX_ATTEMPTS) {
+      if (ocrFileId) await deleteOcrFile(ocrFileId);
       await db
         .update(schema.ingestJobs)
         .set({
           status: "error",
+          ocrFileId: null,
           error: `page ${pageNumber} failed after ${MAX_ATTEMPTS} attempts (may exceed the 60s function limit)`,
         })
         .where(eq(schema.ingestJobs.id, job.id));
@@ -114,6 +133,7 @@ export async function POST(req: Request) {
         epicVision: job.epicVision,
         fileName: job.fileName ?? undefined,
         textLayer,
+        ocrFileId,
       });
 
       const inserted = job.partId ? await insertVoters(job.partId, page.voters) : 0;
@@ -130,6 +150,7 @@ export async function POST(req: Request) {
 
       const nextPage = pageNumber + 1;
       const finished = nextPage > totalPages;
+      if (finished && ocrFileId) await deleteOcrFile(ocrFileId);
       await db
         .update(schema.ingestJobs)
         .set({
@@ -141,6 +162,7 @@ export async function POST(req: Request) {
           lastStepAt: new Date(),
           lastPageAt: new Date(),
           status: finished ? "done" : "processing",
+          ...(finished ? { ocrFileId: null } : {}),
         })
         .where(eq(schema.ingestJobs.id, job.id));
 
