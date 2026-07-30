@@ -27,9 +27,22 @@ export function workerAuthorized(headers: Headers): boolean {
  * is actually sent (a bare fire-and-forget can be dropped when the lambda freezes).
  */
 export function kickStep(origin: string, jobId: number): Promise<unknown> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-worker-secret": WORKER_SECRET,
+  };
+  // Every *.vercel.app deployment sits behind Vercel Deployment Protection (SSO),
+  // which would bounce this server-to-server self-call to the login wall before
+  // it reaches the handler. The automation bypass secret (auto-exposed as this
+  // system env) lets an internal request through. Absent locally — harmless.
+  const bypass = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+  if (bypass) {
+    headers["x-vercel-protection-bypass"] = bypass;
+    headers["x-vercel-set-bypass-cookie"] = "false";
+  }
   return fetch(`${origin}/api/jobs/step`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-worker-secret": WORKER_SECRET },
+    headers,
     body: JSON.stringify({ jobId }),
     // Don't wait on the downstream response; we only need it dispatched.
     keepalive: true,
