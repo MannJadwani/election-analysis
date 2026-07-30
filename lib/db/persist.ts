@@ -1,7 +1,11 @@
 import { and, eq, ne } from "drizzle-orm";
-import { getDb, schema } from "./index";
+import { getDb, schema, type Db } from "./index";
 import type { IngestResult } from "../extraction/pipeline";
 import type { PartMetadata, Voter } from "../extraction/schemas";
+
+// A DB handle that can be the pooled client or a transaction — both expose the
+// same query builders, so persist helpers can run inside a caller's transaction.
+type Handle = Pick<Db, "insert" | "update" | "delete">;
 
 /**
  * Persist an ingest result: upsert the part (booth), then insert its voters.
@@ -97,8 +101,9 @@ export async function updatePartMetadata(
   partId: number,
   metadata: Partial<PartMetadata>,
   language?: string | null,
+  handle?: Handle,
 ): Promise<void> {
-  const db = await getDb();
+  const db = handle ?? (await getDb());
 
   // A part is uniquely identified by (constituency no, part no, revision year).
   // If this roll matches a part already in the DB (a re-upload, or a prior
@@ -133,9 +138,10 @@ export async function updatePartMetadata(
 export async function insertVoters(
   partId: number,
   voters: Voter[],
+  handle?: Handle,
 ): Promise<number> {
   if (!voters.length) return 0;
-  const db = await getDb();
+  const db = handle ?? (await getDb());
   const rows = voters.map((v) => ({
     partId,
     serialNo: v.serial_no,

@@ -155,35 +155,42 @@ export async function POST(req: Request) {
         SOFT_MS,
       );
 
-      const inserted = job.partId ? await insertVoters(job.partId, page.voters) : 0;
-
-      // Merge this page's metadata into the accumulator and push to the part row.
       const acc = mergeMetadataInto(
         { ...((job.metadata as Record<string, unknown>) ?? {}) },
         page,
       );
-      if (job.partId) {
-        const merged = partMetadataSchema.partial().parse(acc);
-        await updatePartMetadata(job.partId, merged, page.source_language ?? null);
-      }
-
+      const merged = partMetadataSchema.partial().parse(acc);
       const nextPage = pageNumber + 1;
       const finished = nextPage > totalPages;
+
+      // Insert the voters, merge metadata, AND advance the cursor atomically. If
+      // the invocation is killed part-way (e.g. the 60s limit), the whole tx
+      // rolls back — so the page is cleanly reprocessed rather than its voters
+      // being inserted twice while the cursor stays put (the 207-vs-177 bug).
+      let inserted = 0;
+      await db.transaction(async (tx) => {
+        inserted = job.partId ? await insertVoters(job.partId, page.voters, tx) : 0;
+        if (job.partId) {
+          await updatePartMetadata(job.partId, merged, page.source_language ?? null, tx);
+        }
+        await tx
+          .update(schema.ingestJobs)
+          .set({
+            nextPage,
+            processedPages: job.processedPages + 1,
+            voterCount: job.voterCount + inserted,
+            metadata: acc,
+            attempts: 0,
+            lastStepAt: new Date(),
+            lastPageAt: new Date(),
+            status: finished ? "done" : "processing",
+            ...(finished ? { ocrFileId: null } : {}),
+          })
+          .where(eq(schema.ingestJobs.id, job.id));
+      });
+
+      // Only after the tx commits is it safe to drop the Mistral upload.
       if (finished && ocrFileId) await deleteOcrFile(ocrFileId);
-      await db
-        .update(schema.ingestJobs)
-        .set({
-          nextPage,
-          processedPages: job.processedPages + 1,
-          voterCount: job.voterCount + inserted,
-          metadata: acc,
-          attempts: 0,
-          lastStepAt: new Date(),
-          lastPageAt: new Date(),
-          status: finished ? "done" : "processing",
-          ...(finished ? { ocrFileId: null } : {}),
-        })
-        .where(eq(schema.ingestJobs.id, job.id));
 
       if (!finished) {
         after(() => kickStep(originFromHeaders(req.headers), job.id));
