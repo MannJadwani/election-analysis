@@ -1,4 +1,4 @@
-import { NextResponse, after } from "next/server";
+import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { analyzePdf } from "@/lib/pdf";
@@ -6,21 +6,17 @@ import { processPage, mergeMetadataInto, type Backend } from "@/lib/extraction/p
 import { uploadForOcr, deleteOcrFile } from "@/lib/extraction/mistral-ocr";
 import { insertVoters, updatePartMetadata } from "@/lib/db/persist";
 import { partMetadataSchema } from "@/lib/extraction/schemas";
-import { originFromHeaders, kickStep, workerAuthorized } from "@/lib/ingest/worker";
+import { workerAuthorized } from "@/lib/ingest/worker";
+import { getUser, isAdmin } from "@/lib/auth-helpers";
 
 export const dynamic = "force-dynamic";
 // Hobby ignores >60; this documents intent and applies if the plan is upgraded.
 export const maxDuration = 60;
 
 const MAX_ATTEMPTS = 3;
-// Longest a pacing "nap" step sleeps before re-kicking. Kept short so a working
-// step never combines a long sleep with page work and trips the 60s limit.
-const NAP_MS = 8_000;
 // Abort a page ourselves before Vercel's hard 60s kill (which can't be caught),
 // so a slow page becomes a retryable soft error instead of a silent job-killer.
 const SOFT_MS = 48_000;
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
@@ -32,14 +28,21 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * Process ONE page of a roll, persist it, and chain the next page. Guarded by a
- * shared worker secret (it runs without a user session). Idempotent-ish: it only
- * advances `next_page` after a page is saved, so a retried/duplicated step
- * re-does at most one page.
+ * Process ONE page of a roll and persist it, then return. The CALLER (the upload
+ * page's drive loop, or a re-run of the poller) calls this repeatedly until the
+ * job is done — driving it client-side is far more reliable on Hobby than
+ * server-side fire-and-forget self-chaining, which drops links. Advancing
+ * `next_page` only after a page is saved (in one transaction) makes a repeated
+ * call re-do at most one page.
+ *
+ * Auth: an admin session (the browser drive loop) or the worker secret (scripts).
  */
 export async function POST(req: Request) {
   if (!workerAuthorized(req.headers)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    const user = await getUser(req.headers).catch(() => null);
+    if (!isAdmin(user)) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
   }
 
   const db = await getDb();
@@ -62,17 +65,19 @@ export async function POST(req: Request) {
       .set({ status: "processing", lastStepAt: new Date() })
       .where(eq(schema.ingestJobs.id, job.id));
 
-    // Rate-limit WITHOUT burning the 60s budget: if it's too soon since the last
-    // page completed, nap briefly and re-kick instead of sleeping the whole
-    // interval in this invocation (a long sleep + page work trips the timeout).
-    // Cheap check first — don't even fetch the 12 MB PDF just to nap.
+    // Rate-limit: if it's too soon since the last page completed, tell the caller
+    // to wait and call back — don't do work this call. The caller paces itself,
+    // so we neither sleep (burning the budget) nor need PDF bytes just to wait.
     if (job.rpm && job.lastPageAt) {
       const interval = Math.ceil(60000 / job.rpm);
-      const elapsed = Date.now() - job.lastPageAt.getTime();
-      if (elapsed < interval) {
-        await sleep(Math.min(NAP_MS, interval - elapsed));
-        after(() => kickStep(originFromHeaders(req.headers), job.id));
-        return NextResponse.json({ status: "processing", waiting: true, page: job.nextPage });
+      const waitMs = interval - (Date.now() - job.lastPageAt.getTime());
+      if (waitMs > 0) {
+        return NextResponse.json({
+          status: "processing",
+          waiting: true,
+          retryAfterMs: Math.min(interval, waitMs),
+          page: job.nextPage,
+        });
       }
     }
 
@@ -115,7 +120,6 @@ export async function POST(req: Request) {
         .update(schema.ingestJobs)
         .set({ ocrFileId, lastStepAt: new Date() })
         .where(eq(schema.ingestJobs.id, job.id));
-      after(() => kickStep(originFromHeaders(req.headers), job.id));
       return NextResponse.json({ status: "processing", uploaded: true });
     }
 
@@ -197,9 +201,6 @@ export async function POST(req: Request) {
       // Only after the tx commits is it safe to drop the Mistral upload.
       if (finished && ocrFileId) await deleteOcrFile(ocrFileId);
 
-      if (!finished) {
-        after(() => kickStep(originFromHeaders(req.headers), job.id));
-      }
       return NextResponse.json({
         status: finished ? "done" : "processing",
         page: pageNumber,
@@ -222,9 +223,6 @@ export async function POST(req: Request) {
           lastStepAt: new Date(),
         })
         .where(eq(schema.ingestJobs.id, job.id));
-      if (!giveUp) {
-        after(() => kickStep(originFromHeaders(req.headers), job.id));
-      }
       return NextResponse.json({
         status: giveUp ? "error" : "retrying",
         page: pageNumber,

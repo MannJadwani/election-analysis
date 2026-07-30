@@ -74,20 +74,39 @@ export default function UploadPage() {
         throw new Error(start.error ?? `Couldn't start ingestion (HTTP ${startRes.status})`);
       }
 
-      // Poll status until the job finishes. The status endpoint also re-kicks a
-      // stalled job, so keeping this tab open keeps the job moving.
+      // Drive the job one page at a time. Calling the worker directly and
+      // awaiting each step is far more reliable on Vercel's free tier than
+      // server-side self-chaining (fire-and-forget kicks drop links). This is
+      // why the tab must stay open — it IS the driver. A dropped connection just
+      // pauses; reopening resumes from the saved cursor.
       setPhase("processing");
       const jobId = start.jobId;
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        await sleep(3000);
-        const st = await fetch(`/api/jobs/status?id=${jobId}`);
-        if (!st.ok) continue; // transient — keep polling
-        const data = (await st.json()) as JobStatus;
-        setJob(data);
-        if (data.status === "done") break;
-        if (data.status === "error") {
-          throw new Error(data.error ?? "Ingestion failed");
+      let done = false;
+      while (!done) {
+        const r = await fetch("/api/jobs/step", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobId }),
+        });
+        if (!r.ok) {
+          // Transient (e.g. a cold-start 500) — pause briefly and try again.
+          await sleep(2500);
+          continue;
+        }
+        const d = (await r.json()) as {
+          status: string;
+          waiting?: boolean;
+          retryAfterMs?: number;
+          error?: string;
+        };
+        if (d.status === "error") throw new Error(d.error ?? "Ingestion failed");
+        if (d.status === "done") done = true;
+        else if (d.waiting) await sleep(d.retryAfterMs ?? 2000);
+
+        // Refresh the progress display after any step that changed state.
+        if (!d.waiting) {
+          const st = await fetch(`/api/jobs/status?id=${jobId}`);
+          if (st.ok) setJob((await st.json()) as JobStatus);
         }
       }
     } catch (e) {

@@ -1,9 +1,7 @@
-import { NextResponse, after } from "next/server";
-import { eq } from "drizzle-orm";
+import { NextResponse } from "next/server";
 import { getDb, schema } from "@/lib/db";
 import { createPartShell } from "@/lib/db/persist";
 import { getUser, isAdmin } from "@/lib/auth-helpers";
-import { originFromHeaders, kickStep } from "@/lib/ingest/worker";
 import type { Backend } from "@/lib/extraction/pipeline";
 
 export const dynamic = "force-dynamic";
@@ -62,16 +60,7 @@ export async function POST(req: Request) {
       })
       .returning({ id: schema.ingestJobs.id });
 
-    // Kick the first step after the response is sent.
-    const origin = originFromHeaders(req.headers);
-    after(async () => {
-      await db
-        .update(schema.ingestJobs)
-        .set({ lastStepAt: new Date() })
-        .where(eq(schema.ingestJobs.id, job.id));
-      await kickStep(origin, job.id);
-    });
-
+    // The client drives the job by calling /api/jobs/step in a loop until done.
     return NextResponse.json({ jobId: job.id, partId, status: "pending" });
   } catch (err) {
     console.error("[ingest] failed:", err);
