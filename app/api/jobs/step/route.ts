@@ -12,8 +12,9 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const MAX_ATTEMPTS = 3;
-// Never sleep so long that the invocation risks the platform timeout.
-const MAX_SLEEP_MS = 45_000;
+// Longest a pacing "nap" step sleeps before re-kicking. Kept short so a working
+// step never combines a long sleep with page work and trips the 60s limit.
+const NAP_MS = 8_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -42,12 +43,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: job.status });
     }
 
-    const prevAt = job.lastStepAt?.getTime() ?? 0;
     // Heartbeat immediately so the status endpoint doesn't see this as stalled.
     await db
       .update(schema.ingestJobs)
       .set({ status: "processing", lastStepAt: new Date() })
       .where(eq(schema.ingestJobs.id, job.id));
+
+    // Rate-limit WITHOUT burning the 60s budget: if it's too soon since the last
+    // page completed, nap briefly and re-kick instead of sleeping the whole
+    // interval in this invocation (a long sleep + page work trips the timeout).
+    // Cheap check first — don't even fetch the 12 MB PDF just to nap.
+    if (job.rpm && job.lastPageAt) {
+      const interval = Math.ceil(60000 / job.rpm);
+      const elapsed = Date.now() - job.lastPageAt.getTime();
+      if (elapsed < interval) {
+        await sleep(Math.min(NAP_MS, interval - elapsed));
+        after(() => kickStep(originFromHeaders(req.headers), job.id));
+        return NextResponse.json({ status: "processing", waiting: true, page: job.nextPage });
+      }
+    }
 
     // Re-fetch the PDF (steps are stateless) and read its structure.
     const res = await fetch(job.blobUrl);
@@ -71,14 +85,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: "done", processedPages: job.processedPages });
     }
 
-    // Rate-limit: space API calls by ~60000/rpm since the previous step.
-    if (job.rpm && prevAt) {
-      const wait = Math.min(MAX_SLEEP_MS, Math.ceil(60000 / job.rpm) - (Date.now() - prevAt));
-      if (wait > 0) await sleep(wait);
-    }
-
     const pageNumber = job.nextPage;
     const textLayer = info?.pages.find((p) => p.pageNumber === pageNumber)?.text;
+
+    // Count this attempt BEFORE the risky work. A page that exceeds the 60s
+    // function limit is killed mid-flight — no catch runs — so without counting
+    // up front it would retry forever. After MAX_ATTEMPTS, give up on the job.
+    const attemptNo = job.attempts + 1;
+    if (attemptNo > MAX_ATTEMPTS) {
+      await db
+        .update(schema.ingestJobs)
+        .set({
+          status: "error",
+          error: `page ${pageNumber} failed after ${MAX_ATTEMPTS} attempts (may exceed the 60s function limit)`,
+        })
+        .where(eq(schema.ingestJobs.id, job.id));
+      return NextResponse.json({ status: "error", page: pageNumber });
+    }
+    await db
+      .update(schema.ingestJobs)
+      .set({ attempts: attemptNo })
+      .where(eq(schema.ingestJobs.id, job.id));
 
     try {
       const page = await processPage(data, pageNumber, {
@@ -112,6 +139,7 @@ export async function POST(req: Request) {
           metadata: acc,
           attempts: 0,
           lastStepAt: new Date(),
+          lastPageAt: new Date(),
           status: finished ? "done" : "processing",
         })
         .where(eq(schema.ingestJobs.id, job.id));
@@ -126,14 +154,12 @@ export async function POST(req: Request) {
         voters: inserted,
       });
     } catch (pageErr) {
-      // A single page failed (rate limit, transient API error). Retry it on the
-      // next step up to MAX_ATTEMPTS before failing the whole job.
-      const attempts = job.attempts + 1;
-      const giveUp = attempts >= MAX_ATTEMPTS;
+      // Soft failure (rate limit, transient API error). The attempt was already
+      // counted up front; give up once they're exhausted, else re-kick to retry.
+      const giveUp = attemptNo >= MAX_ATTEMPTS;
       await db
         .update(schema.ingestJobs)
         .set({
-          attempts: giveUp ? 0 : attempts,
           status: giveUp ? "error" : "processing",
           error: giveUp ? `page ${pageNumber}: ${(pageErr as Error).message}` : null,
           lastStepAt: new Date(),
@@ -145,7 +171,7 @@ export async function POST(req: Request) {
       return NextResponse.json({
         status: giveUp ? "error" : "retrying",
         page: pageNumber,
-        attempts,
+        attempts: attemptNo,
         error: (pageErr as Error).message,
       });
     }

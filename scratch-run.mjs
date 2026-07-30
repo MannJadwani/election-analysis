@@ -1,7 +1,7 @@
 import { put } from "@vercel/blob";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
-const BASE = "https://election-analysis-jinjp6vu2-mannjadwanis-projects.vercel.app";
+const BASE = "https://election-analysis-mxeop0ubd-mannjadwanis-projects.vercel.app";
 const BYPASS = "23WhgHDJQRz3njayvszxfjT9SvaiJSYx";
 const RAW = process.env.RAW;
 const PDF = "/home/mann/Downloads/2026-EROLLGEN-S24-1-SIR-FinalRoll-Revision1-HIN-1-WI.pdf";

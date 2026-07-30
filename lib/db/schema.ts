@@ -117,6 +117,9 @@ export const ingestJobs = pgTable(
     createdBy: text("created_by"),
     // Heartbeat: bumped at the start of every step; used to detect a stalled job.
     lastStepAt: timestamp("last_step_at"),
+    // When the last page actually completed; used to pace API calls to the rpm cap
+    // (separately from the heartbeat, which also ticks on non-working nap steps).
+    lastPageAt: timestamp("last_page_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (t) => [index("ingest_jobs_status_idx").on(t.status)],
