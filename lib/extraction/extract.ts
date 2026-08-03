@@ -88,43 +88,60 @@ export async function extractPage(
   return object;
 }
 
-const epicListSchema = z.object({
-  /** EPIC / voter-ID codes, one per voter card, in reading order. */
-  epics: z.array(z.string()),
+const epicPairsSchema = z.object({
+  /** One entry per voter card: its serial number and its EPIC code. */
+  cards: z.array(
+    z.object({
+      serial: z.number().int().nullable(),
+      epic: z.string(),
+    }),
+  ),
 });
 
+export interface EpicPair {
+  serial: number | null;
+  epic: string;
+}
+
 /**
- * Vision pass that extracts ONLY the EPIC codes from a page image, in reading
- * order. Used to backfill EPIC IDs that OCR drops on scanned rolls, while keeping
- * OCR's superior handling of the (regional-script) names.
+ * Vision pass that reads each voter card's SERIAL number + EPIC code off a page
+ * image. Returning serial→EPIC pairs (rather than a bare ordered list) makes the
+ * merge alignment-proof: EPICs are matched to voters by serial number, so a
+ * dropped/extra card never shifts every downstream EPIC.
+ *
+ * Used to backfill EPIC IDs that OCR drops on scanned rolls, while keeping OCR's
+ * superior handling of the (regional-script) names.
  */
-export async function extractEpics(
+export async function extractEpicPairs(
   png: Buffer,
   opts: { pageNumber: number; model?: string },
-): Promise<string[]> {
+): Promise<EpicPair[]> {
+  // Dedicated EPIC model: mistral-small reads the small boxed codes noticeably
+  // more accurately than pixtral (30/30 vs ~29/30, fewer Q→O / dropped-digit slips).
   const modelSpec =
-    opts.model ?? process.env.VISION_MODEL ?? "mistral/pixtral-12b-2409";
+    opts.model ?? process.env.EPIC_MODEL ?? "mistral/mistral-small-latest";
   const { object } = await generateObject({
     model: resolveModel(modelSpec),
-    schema: epicListSchema,
+    schema: epicPairsSchema,
     system:
-      "You read EPIC / voter-ID codes off Indian electoral-roll pages. Each voter card " +
-      "shows one code: 3 letters followed by 6-8 digits (e.g. ZLW4479184), usually near " +
-      "the top of the card. Return EVERY code on the page in reading order (top-to-bottom " +
-      "within a column, then the next column). Use an empty string for any card whose code " +
-      "is unreadable. Do not skip cards. Return codes only — no names.",
+      "You read voter cards off Indian electoral-roll pages. Each card has a SERIAL number " +
+      "(a small integer, usually top-left) and an EPIC / voter-ID code (usually top-right). " +
+      "EPIC codes come in two formats: 3 letters + 6-8 digits (e.g. TQO0451310, ZLW4479184), " +
+      "OR a slashed form like UP/84/419/0006062. Return one entry per card with its serial " +
+      "and its exact EPIC code. Read every card (3-column grid, top-to-bottom then next " +
+      "column). Use an empty string for any card whose code is unreadable; never invent codes.",
     messages: [
       {
         role: "user",
         content: [
           {
             type: "text",
-            text: `Extract all EPIC codes from page ${opts.pageNumber}, in reading order.`,
+            text: `Read the serial number and EPIC code from every voter card on page ${opts.pageNumber}.`,
           },
           { type: "image", image: png },
         ],
       },
     ],
   });
-  return object.epics;
+  return object.cards;
 }

@@ -78,7 +78,12 @@ export async function structurePage(
 
   // Pull just the Latin EPIC-like codes out of the raw text layer as a reliable hint.
   const epicHint = opts.textLayer
-    ? (opts.textLayer.match(/\b[A-Z]{2,3}\d{6,8}\b/g) ?? []).join(" ")
+    ? (
+        opts.textLayer.match(
+          // New-style (TQO0451310 / ZLW4479184) or old slashed (UP/84/419/0006062).
+          /\b[A-Z]{2,3}\d{6,8}\b|\b[A-Z]{2}\/\d{1,3}\/\d{1,4}\/\d{4,8}\b/g,
+        ) ?? []
+      ).join(" ")
     : "";
 
   // The relation label (Father's/Husband's/etc.) is more reliable in the text layer
