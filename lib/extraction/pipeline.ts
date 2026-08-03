@@ -1,5 +1,5 @@
 import { analyzePdf, renderPages } from "../pdf";
-import { extractPage, extractEpics } from "./extract";
+import { extractPage, extractEpicPairs } from "./extract";
 import { ocrPdf, ocrByFileId } from "./mistral-ocr";
 import { structurePage } from "./structure";
 import {
@@ -159,20 +159,49 @@ export async function processPage(
   }
   const page = await structurePage(ocrPage.markdown, { pageNumber, textLayer });
 
-  // Backfill EPIC IDs via a vision pass when OCR dropped most of them (scans).
-  if (epicVision && page.voters.length > 0) {
-    const missing = page.voters.filter((v) => !v.epic_id).length;
-    if (missing > page.voters.length / 2) {
-      const [rp] = await renderPages(data, { scale, pageNumbers: [pageNumber] });
-      if (rp) {
-        const epics = await extractEpics(rp.png, { pageNumber });
-        for (let i = 0; i < page.voters.length; i++) {
-          if (!page.voters[i].epic_id && epics[i]) page.voters[i].epic_id = epics[i];
-        }
-      }
-    }
+  // Backfill any EPIC IDs OCR dropped (common on scans) via a vision pass.
+  if (epicVision && page.voters.some((v) => !v.epic_id)) {
+    await backfillEpicsByVision(data, pageNumber, scale, page.voters);
   }
   return page;
+}
+
+/**
+ * Fill missing EPIC ids on a page's voters using a vision pass that reads
+ * serial→EPIC pairs, matched by serial number (alignment-proof). Non-fatal: a
+ * failed or rate-limited vision call leaves EPICs missing (recoverable later via
+ * scripts/backfill-epic.ts) rather than failing the whole page.
+ */
+export async function backfillEpicsByVision(
+  data: Uint8Array,
+  pageNumber: number,
+  scale: number,
+  voters: Voter[],
+): Promise<number> {
+  try {
+    const [rp] = await renderPages(data, { scale, pageNumbers: [pageNumber] });
+    if (!rp) return 0;
+    const pairs = await extractEpicPairs(rp.png, { pageNumber });
+    const bySerial = new Map(
+      pairs
+        .filter((p) => p.serial != null && p.epic)
+        .map((p) => [p.serial as number, p.epic]),
+    );
+    let filled = 0;
+    for (const v of voters) {
+      if (!v.epic_id && v.serial_no != null && bySerial.has(v.serial_no)) {
+        v.epic_id = bySerial.get(v.serial_no)!;
+        filled++;
+      }
+    }
+    return filled;
+  } catch (e) {
+    console.warn(
+      `[epic] vision backfill failed on page ${pageNumber}:`,
+      (e as Error).message,
+    );
+    return 0;
+  }
 }
 
 /** Merge one page's metadata fragment into an accumulator (first non-null wins). */
@@ -271,26 +300,10 @@ export async function ingestPdf(
         textLayer,
       });
 
-      // Backfill EPIC IDs via a vision pass when OCR dropped them (scanned rolls).
-      if (epicVision && page.voters.length > 0) {
-        const missing = page.voters.filter((v) => !v.epic_id).length;
-        if (missing > page.voters.length / 2) {
-          if (gate) await gate();
-          const [rp] = await renderPages(data, {
-            scale,
-            pageNumbers: [p.pageNumber],
-          });
-          if (rp) {
-            const epics = await extractEpics(rp.png, {
-              pageNumber: p.pageNumber,
-            });
-            for (let i = 0; i < page.voters.length; i++) {
-              if (!page.voters[i].epic_id && epics[i]) {
-                page.voters[i].epic_id = epics[i];
-              }
-            }
-          }
-        }
+      // Backfill any EPIC IDs OCR dropped (common on scans) via a vision pass.
+      if (epicVision && page.voters.some((v) => !v.epic_id)) {
+        if (gate) await gate();
+        await backfillEpicsByVision(data, p.pageNumber, scale, page.voters);
       }
 
       done += 1;
