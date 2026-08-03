@@ -179,7 +179,12 @@ export async function backfillEpicsByVision(
   voters: Voter[],
 ): Promise<number> {
   try {
-    const [rp] = await renderPages(data, { scale, pageNumbers: [pageNumber] });
+    // Render the EPIC pass sharper than the OCR pass — the codes are small and
+    // benefit from the extra resolution (fewer character misreads).
+    const [rp] = await renderPages(data, {
+      scale: Math.max(scale, 3),
+      pageNumbers: [pageNumber],
+    });
     if (!rp) return 0;
     const pairs = await extractEpicPairs(rp.png, { pageNumber });
     const bySerial = new Map(

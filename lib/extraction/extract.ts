@@ -116,8 +116,10 @@ export async function extractEpicPairs(
   png: Buffer,
   opts: { pageNumber: number; model?: string },
 ): Promise<EpicPair[]> {
+  // Dedicated EPIC model: mistral-small reads the small boxed codes noticeably
+  // more accurately than pixtral (30/30 vs ~29/30, fewer Q→O / dropped-digit slips).
   const modelSpec =
-    opts.model ?? process.env.VISION_MODEL ?? "mistral/pixtral-12b-2409";
+    opts.model ?? process.env.EPIC_MODEL ?? "mistral/mistral-small-latest";
   const { object } = await generateObject({
     model: resolveModel(modelSpec),
     schema: epicPairsSchema,

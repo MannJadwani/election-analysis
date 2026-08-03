@@ -9,13 +9,18 @@ import { extractEpicPairs } from "../lib/extraction/extract";
  * Re-runnable and idempotent: only touches voters whose epic_id is still null,
  * and matches EPICs to voters by SERIAL NUMBER (alignment-proof).
  *
- *   npx tsx scripts/backfill-epic.ts <partId> [--rpm N] [--pdf path] [--from page]
+ *   npx tsx scripts/backfill-epic.ts <partId> [--rpm N] [--pdf path] [--from page] [--overwrite]
  *
  * The PDF is fetched from the part's ingest job blob URL unless --pdf is given.
+ * --overwrite re-reads and replaces EVERY voter's EPIC (to correct earlier
+ * lower-accuracy reads); default only fills voters whose EPIC is still null.
  */
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
   return i >= 0 ? process.argv[i + 1] : undefined;
+}
+function flag(name: string): boolean {
+  return process.argv.includes(name);
 }
 
 async function main() {
@@ -27,6 +32,7 @@ async function main() {
   const rpm = Number(arg("--rpm") ?? "3");
   const fromPage = Number(arg("--from") ?? "1");
   const pdfPath = arg("--pdf");
+  const overwrite = flag("--overwrite");
   const intervalMs = rpm > 0 ? Math.ceil(60000 / rpm) : 0;
 
   const db = await getDb();
@@ -52,10 +58,12 @@ async function main() {
     .select({ before: sql<number>`count(*)::int` })
     .from(schema.voters)
     .where(and(eq(schema.voters.partId, partId), isNull(schema.voters.epicId)));
-  console.log(`Part ${partId}: ${before} voters missing EPIC. Rendering pages…`);
+  console.log(
+    `Part ${partId}: ${before} missing EPIC. Mode: ${overwrite ? "OVERWRITE all" : "fill nulls"}. Rendering pages…`,
+  );
 
-  // Render all pages up front (cheap relative to the vision calls).
-  const rendered = await renderPages(data, { scale: 2 });
+  // Render sharp (scale 3) — the small EPIC codes read more accurately.
+  const rendered = await renderPages(data, { scale: 3 });
   let filledTotal = 0;
   let lastCall = 0;
 
@@ -79,16 +87,17 @@ async function main() {
     let filled = 0;
     for (const p of pairs) {
       if (p.serial == null || !p.epic) continue;
-      const r = await db
-        .update(schema.voters)
-        .set({ epicId: p.epic })
-        .where(
-          and(
+      const where = overwrite
+        ? and(
+            eq(schema.voters.partId, partId),
+            eq(schema.voters.serialNo, p.serial),
+          )
+        : and(
             eq(schema.voters.partId, partId),
             eq(schema.voters.serialNo, p.serial),
             isNull(schema.voters.epicId),
-          ),
-        );
+          );
+      const r = await db.update(schema.voters).set({ epicId: p.epic }).where(where);
       // drizzle-orm/postgres-js returns a result with rowCount/count on some drivers.
       const n = (r as unknown as { count?: number; rowCount?: number }).count ??
         (r as unknown as { rowCount?: number }).rowCount ?? 0;
